@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.ImageDecoder
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
@@ -224,9 +225,15 @@ private fun QRStudioApp() {
     }
 
     val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
+        contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         uri?.let { selectedUri ->
+            runCatching {
+                appContext.contentResolver.takePersistableUriPermission(
+                    selectedUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
             scope.launch {
                 val centerImage = withContext(Dispatchers.IO) {
                     cacheCenterImage(appContext, selectedUri)
@@ -377,7 +384,7 @@ private fun QRStudioApp() {
                 onBackgroundChange = { backgroundHex = it.uppercase().filter { char -> char in "0123456789ABCDEF" }.take(6) },
                 centerImageUri = centerImageUri,
                 centerImageBitmap = centerImageBitmap,
-                onPickImage = { imagePicker.launch("image/*") },
+                onPickImage = { imagePicker.launch(arrayOf("image/*")) },
                 onRemoveImage = {
                     centerImageString?.let { deleteCachedCenterImage(appContext, Uri.parse(it)) }
                     centerImageBitmap = null
@@ -554,12 +561,12 @@ private fun StyleTab(
             )
         }
 
-        SettingGroup(title = "中心图像", supporting = "推荐使用正方形 PNG，二维码中心会自动保留安全区。") {
+        SettingGroup(title = "中心图像", supporting = "选择图片后会自动居中裁切为正方形，并保留二维码安全区。") {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 SelectedImagePreview(bitmap = centerImageBitmap)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (centerImageUri == null) "尚未添加图像" else "已添加中心图像",
+                        text = if (centerImageUri == null) "尚未添加图像" else "已裁切为正方形",
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
@@ -573,7 +580,7 @@ private fun StyleTab(
                 Button(onClick = onPickImage, shape = RoundedCornerShape(12.dp)) {
                     Icon(Icons.Default.AddPhotoAlternate, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text(if (centerImageUri == null) "选择图像" else "更换图像")
+                    Text(if (centerImageUri == null) "选择并裁切" else "重新选择并裁切")
                 }
                 if (centerImageUri != null) {
                     TextButton(onClick = onRemoveImage) { Text("移除") }
@@ -944,7 +951,26 @@ private fun centerCropRect(bitmap: Bitmap): Rect {
     return Rect(left, top, left + side, top + side)
 }
 
-private fun decodeBitmap(context: Context, uri: Uri): Bitmap? {
+private fun decodeBitmap(context: Context, uri: Uri): Bitmap? = runCatching {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+            val sourceSize = info.size
+            val longestSide = maxOf(sourceSize.width, sourceSize.height)
+            if (longestSide > 512) {
+                val scale = 512f / longestSide
+                decoder.setTargetSize(
+                    maxOf(1, (sourceSize.width * scale).roundToInt()),
+                    maxOf(1, (sourceSize.height * scale).roundToInt()),
+                )
+            }
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    } else {
+        decodeBitmapFactory(context, uri)
+    }
+}.getOrNull()
+
+private fun decodeBitmapFactory(context: Context, uri: Uri): Bitmap? {
     val resolver = context.contentResolver
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
@@ -957,11 +983,12 @@ private fun decodeBitmap(context: Context, uri: Uri): Bitmap? {
 
 private fun cacheCenterImage(context: Context, sourceUri: Uri): CenterImageAsset? {
     val bitmap = decodeBitmap(context, sourceUri) ?: return null
+    val squareBitmap = cropToSquare(bitmap)
     val imageDir = File(context.filesDir, "qr_images").apply { mkdirs() }
     val imageFile = File(imageDir, "center_image_${System.currentTimeMillis()}.png")
     return try {
         val encoded = imageFile.outputStream().use { output ->
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+            squareBitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
         }
         if (!encoded) {
             imageFile.delete()
@@ -974,12 +1001,27 @@ private fun cacheCenterImage(context: Context, sourceUri: Uri): CenterImageAsset
 
         CenterImageAsset(
             uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile),
-            bitmap = bitmap,
+            bitmap = squareBitmap,
         )
     } catch (_: Exception) {
         imageFile.delete()
         null
     }
+}
+
+private fun cropToSquare(bitmap: Bitmap): Bitmap {
+    val source = centerCropRect(bitmap)
+    if (source.width() == bitmap.width && source.height() == bitmap.height) return bitmap
+
+    val side = source.width()
+    val cropped = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+    Canvas(cropped).drawBitmap(
+        bitmap,
+        source,
+        Rect(0, 0, side, side),
+        Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+    )
+    return cropped
 }
 
 private fun deleteCachedCenterImage(context: Context, uri: Uri) {
