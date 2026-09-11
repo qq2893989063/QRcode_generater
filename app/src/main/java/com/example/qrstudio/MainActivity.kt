@@ -153,6 +153,8 @@ private data class QrConfig(
 
 private data class GeneratedQr(val bitmap: Bitmap, val canvasSize: Int)
 
+private data class CenterImageAsset(val uri: Uri, val bitmap: Bitmap)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -180,14 +182,19 @@ private fun QRStudioApp() {
     var foregroundHex by rememberSaveable { mutableStateOf(DEFAULT_FOREGROUND) }
     var backgroundHex by rememberSaveable { mutableStateOf(DEFAULT_BACKGROUND) }
     var centerImageString by rememberSaveable { mutableStateOf<String?>(null) }
+    var centerImageBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var inMemoryImageUri by remember { mutableStateOf<String?>(null) }
 
     val correction = correctionOptions.firstOrNull { it.key == correctionKey } ?: correctionOptions.last()
     val foreground = parseUiColor(foregroundHex, Color(0xFF111827))
     val background = parseUiColor(backgroundHex, Color.White)
     val centerImageUri = centerImageString?.let(Uri::parse)
-    val centerImageBitmap by produceState<Bitmap?>(initialValue = null, centerImageString) {
-        value = withContext(Dispatchers.IO) {
-            centerImageUri?.let { decodeBitmap(appContext, it) }
+    LaunchedEffect(centerImageString) {
+        if (centerImageString != inMemoryImageUri) {
+            centerImageBitmap = withContext(Dispatchers.IO) {
+                centerImageUri?.let { decodeBitmap(appContext, it) }
+            }
+            inMemoryImageUri = centerImageString
         }
     }
 
@@ -221,13 +228,15 @@ private fun QRStudioApp() {
     ) { uri ->
         uri?.let { selectedUri ->
             scope.launch {
-                val localUri = withContext(Dispatchers.IO) {
+                val centerImage = withContext(Dispatchers.IO) {
                     cacheCenterImage(appContext, selectedUri)
                 }
-                if (localUri == null) {
+                if (centerImage == null) {
                     snackbarHostState.showSnackbar("无法读取所选图像，请重新选择")
                 } else {
-                    centerImageString = localUri.toString()
+                    centerImageBitmap = centerImage.bitmap
+                    inMemoryImageUri = centerImage.uri.toString()
+                    centerImageString = centerImage.uri.toString()
                     selectedTab = AppTab.STYLE
                 }
             }
@@ -367,9 +376,12 @@ private fun QRStudioApp() {
                 backgroundHex = backgroundHex,
                 onBackgroundChange = { backgroundHex = it.uppercase().filter { char -> char in "0123456789ABCDEF" }.take(6) },
                 centerImageUri = centerImageUri,
+                centerImageBitmap = centerImageBitmap,
                 onPickImage = { imagePicker.launch("image/*") },
                 onRemoveImage = {
                     centerImageString?.let { deleteCachedCenterImage(appContext, Uri.parse(it)) }
+                    centerImageBitmap = null
+                    inMemoryImageUri = null
                     centerImageString = null
                 },
             )
@@ -476,10 +488,10 @@ private fun StyleTab(
     backgroundHex: String,
     onBackgroundChange: (String) -> Unit,
     centerImageUri: Uri?,
+    centerImageBitmap: Bitmap?,
     onPickImage: () -> Unit,
     onRemoveImage: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
     val inkSwatches = listOf("111827", "00695C", "3F3F46", "7C2D12")
     val paperSwatches = listOf("FFFFFF", "F5F5F4", "FFF7ED", "ECFEFF")
 
@@ -544,7 +556,7 @@ private fun StyleTab(
 
         SettingGroup(title = "中心图像", supporting = "推荐使用正方形 PNG，二维码中心会自动保留安全区。") {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                SelectedImagePreview(uri = centerImageUri, context = context)
+                SelectedImagePreview(bitmap = centerImageBitmap)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (centerImageUri == null) "尚未添加图像" else "已添加中心图像",
@@ -845,10 +857,7 @@ private fun ExportInfoRow(label: String, value: String) {
 }
 
 @Composable
-private fun SelectedImagePreview(uri: Uri?, context: Context) {
-    val bitmap by produceState<Bitmap?>(initialValue = null, uri) {
-        value = withContext(Dispatchers.IO) { uri?.let { decodeBitmap(context, it) } }
-    }
+private fun SelectedImagePreview(bitmap: Bitmap?) {
     Box(
         modifier = Modifier
             .size(72.dp)
@@ -946,19 +955,27 @@ private fun decodeBitmap(context: Context, uri: Uri): Bitmap? {
     return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
 }
 
-private fun cacheCenterImage(context: Context, sourceUri: Uri): Uri? {
+private fun cacheCenterImage(context: Context, sourceUri: Uri): CenterImageAsset? {
+    val bitmap = decodeBitmap(context, sourceUri) ?: return null
     val imageDir = File(context.filesDir, "qr_images").apply { mkdirs() }
-    val imageFile = File(imageDir, "center_image_${System.currentTimeMillis()}.img")
+    val imageFile = File(imageDir, "center_image_${System.currentTimeMillis()}.png")
     return try {
-        context.contentResolver.openInputStream(sourceUri)?.use { input ->
-            imageFile.outputStream().use { output -> input.copyTo(output) }
-        } ?: return null
+        val encoded = imageFile.outputStream().use { output ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        }
+        if (!encoded) {
+            imageFile.delete()
+            return null
+        }
 
         imageDir.listFiles()
             ?.filter { it != imageFile }
             ?.forEach { it.delete() }
 
-        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile)
+        CenterImageAsset(
+            uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile),
+            bitmap = bitmap,
+        )
     } catch (_: Exception) {
         imageFile.delete()
         null
