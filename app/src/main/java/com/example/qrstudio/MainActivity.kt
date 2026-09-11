@@ -213,9 +213,18 @@ private fun QRStudioApp() {
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent(),
     ) { uri ->
-        uri?.let {
-            centerImageString = it.toString()
-            selectedTab = AppTab.STYLE
+        uri?.let { selectedUri ->
+            scope.launch {
+                val localUri = withContext(Dispatchers.IO) {
+                    cacheCenterImage(appContext, selectedUri)
+                }
+                if (localUri == null) {
+                    snackbarHostState.showSnackbar("无法读取所选图像，请重新选择")
+                } else {
+                    centerImageString = localUri.toString()
+                    selectedTab = AppTab.STYLE
+                }
+            }
         }
     }
 
@@ -352,7 +361,10 @@ private fun QRStudioApp() {
                 onBackgroundChange = { backgroundHex = it.uppercase().filter { char -> char in "0123456789ABCDEF" }.take(6) },
                 centerImageUri = centerImageUri,
                 onPickImage = { imagePicker.launch("image/*") },
-                onRemoveImage = { centerImageString = null },
+                onRemoveImage = {
+                    centerImageString?.let { deleteCachedCenterImage(appContext, Uri.parse(it)) }
+                    centerImageString = null
+                },
             )
 
             AppTab.EXPORT -> ExportTab(
@@ -900,6 +912,32 @@ private fun decodeBitmap(context: Context, uri: Uri): Bitmap? {
     while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) sample *= 2
     val options = BitmapFactory.Options().apply { inSampleSize = sample }
     return resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+}
+
+private fun cacheCenterImage(context: Context, sourceUri: Uri): Uri? {
+    val imageDir = File(context.filesDir, "qr_images").apply { mkdirs() }
+    val imageFile = File(imageDir, "center_image_${System.currentTimeMillis()}.img")
+    return try {
+        context.contentResolver.openInputStream(sourceUri)?.use { input ->
+            imageFile.outputStream().use { output -> input.copyTo(output) }
+        } ?: return null
+
+        imageDir.listFiles()
+            ?.filter { it != imageFile }
+            ?.forEach { it.delete() }
+
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", imageFile)
+    } catch (_: Exception) {
+        imageFile.delete()
+        null
+    }
+}
+
+private fun deleteCachedCenterImage(context: Context, uri: Uri) {
+    if (uri.authority != "${context.packageName}.fileprovider") return
+    File(context.filesDir, "qr_images").listFiles()
+        ?.filter { it.name.startsWith("center_image_") }
+        ?.forEach { it.delete() }
 }
 
 private fun saveQrToGallery(context: Context, bitmap: Bitmap): Uri? {

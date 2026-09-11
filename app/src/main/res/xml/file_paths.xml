@@ -3,4 +3,7 @@
     <cache-path
         name="shared_qr_images"
         path="images/" />
+    <files-path
+        name="center_images"
+        path="qr_images/" />
 </paths>
