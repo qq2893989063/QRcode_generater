@@ -148,7 +148,7 @@ private data class QrConfig(
     val margin: Int,
     val foreground: Int,
     val background: Int,
-    val centerImageUri: Uri?,
+    val centerImage: Bitmap?,
 )
 
 private data class GeneratedQr(val bitmap: Bitmap, val canvasSize: Int)
@@ -185,6 +185,11 @@ private fun QRStudioApp() {
     val foreground = parseUiColor(foregroundHex, Color(0xFF111827))
     val background = parseUiColor(backgroundHex, Color.White)
     val centerImageUri = centerImageString?.let(Uri::parse)
+    val centerImageBitmap by produceState<Bitmap?>(initialValue = null, centerImageString) {
+        value = withContext(Dispatchers.IO) {
+            centerImageUri?.let { decodeBitmap(appContext, it) }
+        }
+    }
 
     val generatedQr by produceState<GeneratedQr?>(
         initialValue = null,
@@ -194,6 +199,7 @@ private fun QRStudioApp() {
         foregroundHex,
         backgroundHex,
         centerImageString,
+        centerImageBitmap,
     ) {
         val config = QrConfig(
             content = generatedContent,
@@ -201,12 +207,14 @@ private fun QRStudioApp() {
             margin = margin,
             foreground = parseColorInt(foregroundHex, android.graphics.Color.DKGRAY),
             background = parseColorInt(backgroundHex, android.graphics.Color.WHITE),
-            centerImageUri = centerImageUri,
+            centerImage = centerImageBitmap,
         )
         value = if (config.content.isBlank()) {
             null
+        } else if (centerImageString != null && centerImageBitmap == null) {
+            null
         } else {
-            withContext(Dispatchers.Default) { generateQrBitmap(appContext, config) }
+            withContext(Dispatchers.Default) { generateQrBitmap(config) }
         }
     }
 
@@ -338,6 +346,7 @@ private fun QRStudioApp() {
                 draftContent = draftContent,
                 onDraftChange = { draftContent = it },
                 generatedQr = generatedQr,
+                centerImageBitmap = centerImageBitmap,
                 onQuickContent = { draftContent = it },
                 onGenerate = {
                     generatedContent = draftContent.trim()
@@ -370,6 +379,7 @@ private fun QRStudioApp() {
             AppTab.EXPORT -> ExportTab(
                 modifier = Modifier.padding(innerPadding),
                 generatedQr = generatedQr,
+                centerImageBitmap = centerImageBitmap,
                 correction = correction,
                 margin = margin,
                 hasCenterImage = centerImageUri != null,
@@ -386,6 +396,7 @@ private fun ContentTab(
     draftContent: String,
     onDraftChange: (String) -> Unit,
     generatedQr: GeneratedQr?,
+    centerImageBitmap: Bitmap?,
     onQuickContent: (String) -> Unit,
     onGenerate: () -> Unit,
 ) {
@@ -403,7 +414,11 @@ private fun ContentTab(
             subtitle = "输入一段文本或链接，实时查看可分享的二维码。",
         )
 
-        PreviewPanel(generatedQr = generatedQr, title = "实时预览")
+        PreviewPanel(
+            generatedQr = generatedQr,
+            centerImage = centerImageBitmap,
+            title = "实时预览",
+        )
 
         SectionLabel("输入内容")
         OutlinedTextField(
@@ -563,6 +578,7 @@ private fun StyleTab(
 private fun ExportTab(
     modifier: Modifier,
     generatedQr: GeneratedQr?,
+    centerImageBitmap: Bitmap?,
     correction: CorrectionOption,
     margin: Int,
     hasCenterImage: Boolean,
@@ -583,7 +599,11 @@ private fun ExportTab(
             subtitle = "保存高清 PNG，或直接发送给其他应用。",
         )
 
-        PreviewPanel(generatedQr = generatedQr, title = "导出预览")
+        PreviewPanel(
+            generatedQr = generatedQr,
+            centerImage = centerImageBitmap,
+            title = "导出预览",
+        )
 
         OutlinedCard(
             modifier = Modifier.fillMaxWidth(),
@@ -748,7 +768,7 @@ private fun ColorSwatch(hex: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PreviewPanel(generatedQr: GeneratedQr?, title: String) {
+private fun PreviewPanel(generatedQr: GeneratedQr?, centerImage: Bitmap?, title: String) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -782,6 +802,22 @@ private fun PreviewPanel(generatedQr: GeneratedQr?, title: String) {
                         contentDescription = "二维码预览",
                         modifier = Modifier.fillMaxSize().padding(10.dp),
                     )
+                    if (centerImage != null) {
+                        Surface(
+                            modifier = Modifier
+                                .size(50.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .border(2.dp, Color.White, RoundedCornerShape(9.dp)),
+                            shape = RoundedCornerShape(9.dp),
+                            color = Color.White,
+                        ) {
+                            Image(
+                                bitmap = centerImage.asImageBitmap(),
+                                contentDescription = "二维码中心图像预览",
+                                modifier = Modifier.padding(4.dp).clip(RoundedCornerShape(6.dp)),
+                            )
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(14.dp))
@@ -850,7 +886,7 @@ private fun Color.toArgbInt(): Int {
     return android.graphics.Color.argb(alpha, red, green, blue)
 }
 
-private fun generateQrBitmap(context: Context, config: QrConfig): GeneratedQr? {
+private fun generateQrBitmap(config: QrConfig): GeneratedQr? {
     val hints = EnumMap<EncodeHintType, Any>(EncodeHintType::class.java).apply {
         put(EncodeHintType.ERROR_CORRECTION, config.correction)
         put(EncodeHintType.MARGIN, config.margin)
@@ -869,10 +905,8 @@ private fun generateQrBitmap(context: Context, config: QrConfig): GeneratedQr? {
     }
     bitmap.setPixels(pixels, 0, QR_SIZE, 0, 0, QR_SIZE, QR_SIZE)
 
-    config.centerImageUri?.let { uri ->
-        decodeBitmap(context, uri)?.let { centerBitmap ->
-            drawCenterImage(bitmap, centerBitmap, config.background)
-        }
+    config.centerImage?.let { centerBitmap ->
+        drawCenterImage(bitmap, centerBitmap, config.background)
     }
     return GeneratedQr(bitmap = bitmap, canvasSize = QR_SIZE)
 }
