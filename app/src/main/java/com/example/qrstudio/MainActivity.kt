@@ -211,8 +211,6 @@ private fun QRStudioApp() {
         )
         value = if (config.content.isBlank()) {
             null
-        } else if (centerImageString != null && centerImageBitmap == null) {
-            null
         } else {
             withContext(Dispatchers.Default) { generateQrBitmap(config) }
         }
@@ -622,7 +620,7 @@ private fun ExportTab(
 
         Button(
             onClick = onSave,
-            enabled = generatedQr != null,
+            enabled = generatedQr != null && (!hasCenterImage || centerImageBitmap != null),
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(16.dp),
         ) {
@@ -632,7 +630,7 @@ private fun ExportTab(
         }
         OutlinedButton(
             onClick = onShare,
-            enabled = generatedQr != null,
+            enabled = generatedQr != null && (!hasCenterImage || centerImageBitmap != null),
             modifier = Modifier.fillMaxWidth().height(52.dp),
             shape = RoundedCornerShape(16.dp),
         ) {
